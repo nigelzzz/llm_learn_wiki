@@ -113,3 +113,37 @@ tail->next = new ListNode(11); tail = tail->next;
 ### Review later
 - §1.1 剩下的 817、2058 — 強迫自己用六步法答，沒有模板提示。
 - 做完每題後自問：「我講的內容，能不能被沒看過題目的人 60 秒內聽懂？」
+
+---
+
+## 2026-05-20
+
+### Topic
+FlashAttention backward Stage 1 — 手推閉式梯度 `dQ, dK, dV`（softmax 反傳 + `D` 化簡）。
+
+### What confused me
+三個卡點：(1) softmax 反傳到底寫 `J dp` 還是 `Jᵀ dp`；(2) `D = rowsum(dO⊙O)` 從哪冒出來、為何不需要 `dP`；(3) 既然 `dS` 公式裡還有 `dP`，為何說 backward 不物化 `N×N`。
+
+### My wrong intuition
+- 以為「反向傳播 = `J dp`」是通則。
+- 看到 `D = Σⱼ Pᵢⱼ dPᵢⱼ` 直覺它一定要整個 `N×N` 的 `dP` 才能算。
+- 把「公式裡出現 `dP`」誤當成「執行時必須存下整個 `dP`」。
+
+### Correct intuition
+- 反向傳播通則是 **`ds = Jᵀ dp`**；softmax 的 `J = diag(p) − ppᵀ` 剛好**對稱**，才退化成 `J dp`。別把對稱當通則，一律先記 `Jᵀ`。
+- `Dᵢ = Σⱼ Pᵢⱼ dPᵢⱼ`，代入 `dPᵢⱼ = dOᵢ·Vⱼ` 後，**關鍵動作是「`dOᵢ` 與 `j` 無關，提出 `Σⱼ` 外」**，括號內 `Σⱼ Pᵢⱼ Vⱼ` 塌縮回前向的 `Oᵢ`，得 `Dᵢ = dOᵢ·Oᵢ`。於是只需 `dO`(輸入)和 `O`(前向已存)，零 `N×N`。
+- `dP` 是**逐 tile 當場算 `dPᵢⱼ = dOᵢ Vⱼᵀ`**（小 block），算完 `dSᵢⱼ`、累加進 `dK/dQ` 後即丟。SRAM 同時只住一個 tile，從不物化整個 `N×N`。
+
+### Minimal example
+```python
+# D 化簡的核心：dOᵢ 與 j 無關 → 提出求和
+# Dᵢ = Σⱼ Pᵢⱼ (dOᵢ·Vⱼ) = dOᵢ·(Σⱼ Pᵢⱼ Vⱼ) = dOᵢ·Oᵢ
+D = (dO * O).sum(-1)          # rowsum(dO⊙O)，(N,)，預先一次算好
+# 完整鏈：dV=PᵀdO; dP=dO Vᵀ; dS=P⊙(dP−D); dQ=τ dS K; dK=τ dSᵀQ
+```
+（已用 fp64 對拍 torch.autograd，誤差 ~1e-16，見 domains/flash_attention_backward/labs.md Lab 1–3）
+
+### Review later
+- Stage 2：把閉式解寫成 PyTorch reference 並 gradcheck（labs Lab 1）。
+- Stage 4：tiled 版，故意把 `dQ[i] +=` 改 `=` 體會「dQ 跨 key block 累加」。
+- 口頭測驗：2 分鐘內從 `O=PV` 默推到 `dQ,dK,dV`，並講出 `D` 由來一句話。
